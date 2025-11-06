@@ -33,8 +33,8 @@ endef
 define Build/Compile
 	# Install dependencies and build
 	cd $(PKG_BUILD_DIR) && \
-	npm install --production=false && \
-	npm run build
+	pnpm install && \
+	pnpm run build
 
 	# Create package structure
 	rm -rf $(PKG_BUILD_DIR)/package_root
@@ -48,7 +48,7 @@ define Build/Compile
 
 	# Install production dependencies only
 	cd $(PKG_BUILD_DIR)/package_root/www/quecmanager && \
-	npm install --production --omit=dev
+	pnpm install --prod
 
 	# Copy CGI scripts (legacy support)
 	mkdir -p $(PKG_BUILD_DIR)/package_root/www/cgi-bin
