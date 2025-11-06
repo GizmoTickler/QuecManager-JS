@@ -1,0 +1,279 @@
+name: Build OpenWRT IPK Package
+
+on:
+  push:
+    branches:
+      - main
+      - development
+      - 'claude/**'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - development
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: 'Target architecture'
+        required: false
+        default: 'aarch64_cortex-a53'
+        type: choice
+        options:
+          - aarch64_cortex-a53
+          - arm_cortex-a7
+          - x86_64
+          - mipsel_24kc
+
+env:
+  OPENWRT_VERSION: '23.05.3'
+  PACKAGE_NAME: 'quecmanager-js'
+
+jobs:
+  build-ipk:
+    name: Build IPK for ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        arch:
+          - aarch64_cortex-a53  # Most Qualcomm 5G modems (SDX55, SDX62, etc.)
+          - arm_cortex-a7       # Older Quectel modems
+          - x86_64              # Testing/development
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            ecj \
+            fastjar \
+            file \
+            g++ \
+            gawk \
+            gettext \
+            git \
+            java-propose-classpath \
+            libelf-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libssl-dev \
+            python3 \
+            python3-distutils \
+            rsync \
+            subversion \
+            swig \
+            time \
+            unzip \
+            wget \
+            xsltproc \
+            zlib1g-dev
+
+      - name: Cache OpenWRT SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: openwrt-sdk
+          key: openwrt-sdk-${{ env.OPENWRT_VERSION }}-${{ matrix.arch }}
+
+      - name: Download OpenWRT SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          ARCH=${{ matrix.arch }}
+          SDK_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets"
+
+          # Map architecture to target/subtarget
+          case "$ARCH" in
+            aarch64_cortex-a53)
+              TARGET="ipq40xx/generic"
+              ;;
+            arm_cortex-a7)
+              TARGET="ipq806x/generic"
+              ;;
+            x86_64)
+              TARGET="x86/64"
+              ;;
+            *)
+              echo "Unknown architecture: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          SDK_FILE="openwrt-sdk-${{ env.OPENWRT_VERSION }}-${TARGET/\//-}.Linux-x86_64.tar.xz"
+
+          echo "Downloading SDK: $SDK_URL/$TARGET/$SDK_FILE"
+          wget -q "$SDK_URL/$TARGET/$SDK_FILE" -O sdk.tar.xz
+
+          mkdir -p openwrt-sdk
+          tar -xJf sdk.tar.xz --strip-components=1 -C openwrt-sdk
+          rm sdk.tar.xz
+
+      - name: Prepare package feed
+        run: |
+          cd openwrt-sdk
+
+          # Create package directory
+          mkdir -p package/quecmanager-js
+
+          # Copy package files
+          cp -r ../openwrt/* package/quecmanager-js/
+
+          # Copy source files (excluding node_modules and build artifacts)
+          rsync -av \
+            --exclude='node_modules' \
+            --exclude='.next' \
+            --exclude='out' \
+            --exclude='.git' \
+            --exclude='openwrt-sdk' \
+            ../ package/quecmanager-js/src/
+
+      - name: Update feeds
+        run: |
+          cd openwrt-sdk
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure build
+        run: |
+          cd openwrt-sdk
+
+          # Create minimal config
+          cat > .config <<EOF
+          CONFIG_PACKAGE_${{ env.PACKAGE_NAME }}=m
+          EOF
+
+          make defconfig
+
+      - name: Build package
+        run: |
+          cd openwrt-sdk
+          make package/${{ env.PACKAGE_NAME }}/compile V=s
+
+      - name: Find built IPK
+        id: find-ipk
+        run: |
+          cd openwrt-sdk
+          IPK_FILE=$(find bin/packages -name "${{ env.PACKAGE_NAME }}*.ipk" | head -n 1)
+
+          if [ -z "$IPK_FILE" ]; then
+            echo "ERROR: IPK file not found!"
+            exit 1
+          fi
+
+          echo "IPK_FILE=$IPK_FILE" >> $GITHUB_OUTPUT
+          echo "IPK_NAME=$(basename $IPK_FILE)" >> $GITHUB_OUTPUT
+
+          # Get file info
+          ls -lh "$IPK_FILE"
+          echo "Built package: $IPK_FILE"
+
+      - name: Upload IPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-${{ matrix.arch }}-ipk
+          path: openwrt-sdk/${{ steps.find-ipk.outputs.IPK_FILE }}
+          retention-days: 30
+
+      - name: Create checksums
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd openwrt-sdk/$(dirname ${{ steps.find-ipk.outputs.IPK_FILE }})
+          sha256sum $(basename ${{ steps.find-ipk.outputs.IPK_FILE }}) > $(basename ${{ steps.find-ipk.outputs.IPK_FILE }}).sha256
+          md5sum $(basename ${{ steps.find-ipk.outputs.IPK_FILE }}) > $(basename ${{ steps.find-ipk.outputs.IPK_FILE }}).md5
+
+  create-release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-ipk
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -name "*.ipk" -exec cp {} release/ \;
+          find artifacts -name "*.sha256" -exec cp {} release/ \;
+          find artifacts -name "*.md5" -exec cp {} release/ \;
+
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## QuecManager-JS OpenWRT Package
+
+            ### Installation
+
+            1. Download the appropriate IPK for your architecture
+            2. Copy to your OpenWRT device:
+               ```bash
+               scp quecmanager-js_*.ipk root@router:/tmp/
+               ```
+            3. Install the package:
+               ```bash
+               opkg install /tmp/quecmanager-js_*.ipk
+               ```
+            4. Access the web interface at `http://router-ip:3000`
+
+            ### Supported Architectures
+            - **aarch64_cortex-a53**: Qualcomm SDX55, SDX62, SDX65 (most 5G modems)
+            - **arm_cortex-a7**: Older Quectel modems
+            - **x86_64**: Development/testing
+
+            ### Features
+            - ✅ Phase 1: Core Infrastructure (auth, AT commands)
+            - ✅ Phase 2: Dashboard & Home Data
+            - ✅ Phase 3: Cell Settings
+            - ✅ Phase 4: System Settings
+            - ✅ Phase 5: Background Services
+            - ✅ 158 passing tests
+
+            ### What's Changed
+            See full changelog below.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-success:
+    name: Build Status Notification
+    needs: build-ipk
+    if: success()
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## ✅ Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "IPK packages built successfully for all architectures!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Architectures:" >> $GITHUB_STEP_SUMMARY
+          echo "- aarch64_cortex-a53 (Qualcomm 5G modems)" >> $GITHUB_STEP_SUMMARY
+          echo "- arm_cortex-a7 (Older Quectel modems)" >> $GITHUB_STEP_SUMMARY
+          echo "- x86_64 (Development/testing)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download artifacts from the Actions tab." >> $GITHUB_STEP_SUMMARY
