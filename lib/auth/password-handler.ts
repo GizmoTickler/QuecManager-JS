@@ -248,3 +248,112 @@ export function cleanupRateLimitMap(): void {
 
 // Clean up every 5 minutes
 setInterval(cleanupRateLimitMap, 5 * 60 * 1000);
+
+/**
+ * Change user password
+ * @param username - Username (typically 'root')
+ * @param oldPassword - Current password
+ * @param newPassword - New password
+ * @returns Success status
+ */
+export async function changePassword(
+  username: string,
+  oldPassword: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Validate old password format
+    const oldValidation = validatePassword(oldPassword);
+    if (!oldValidation.valid) {
+      return { success: false, error: 'Current password is invalid' };
+    }
+
+    // Validate new password format
+    const newValidation = validatePassword(newPassword);
+    if (!newValidation.valid) {
+      return { success: false, error: newValidation.error };
+    }
+
+    // Verify old password
+    const isOldPasswordCorrect = await verifyPassword(username, oldPassword);
+    if (!isOldPasswordCorrect) {
+      return { success: false, error: 'Current password is incorrect' };
+    }
+
+    // Change password using passwd command
+    const { promises: fs } = await import('fs');
+    const { spawn } = await import('child_process');
+
+    // Create a temporary file for the new password
+    const tmpFile = `/tmp/passwd_change_${Date.now()}.tmp`;
+
+    try {
+      // Write new password twice (for confirmation) to temp file
+      await fs.writeFile(tmpFile, `${newPassword}\n${newPassword}\n`, {
+        mode: 0o600,
+      });
+
+      // Change password using passwd command with input from file
+      return new Promise<{ success: boolean; error?: string }>((resolve) => {
+        const passwd = spawn('passwd', [username], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        passwd.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        passwd.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        passwd.on('close', async (code) => {
+          // Clean up temp file
+          try {
+            await fs.unlink(tmpFile);
+          } catch (error) {
+            console.error('Failed to delete temp file:', error);
+          }
+
+          if (code === 0) {
+            resolve({ success: true });
+          } else {
+            console.error('passwd command failed:', stderr);
+            resolve({ success: false, error: 'Failed to change password' });
+          }
+        });
+
+        passwd.on('error', async (error) => {
+          // Clean up temp file
+          try {
+            await fs.unlink(tmpFile);
+          } catch (err) {
+            console.error('Failed to delete temp file:', err);
+          }
+
+          console.error('passwd command error:', error);
+          resolve({ success: false, error: 'Failed to change password' });
+        });
+
+        // Write new password to stdin
+        passwd.stdin.write(`${newPassword}\n${newPassword}\n`);
+        passwd.stdin.end();
+      });
+    } catch (error) {
+      // Clean up temp file if it exists
+      try {
+        await fs.unlink(tmpFile);
+      } catch (err) {
+        // Ignore error if file doesn't exist
+      }
+
+      throw error;
+    }
+  } catch (error) {
+    console.error('Password change error:', error);
+    return { success: false, error: 'Failed to change password' };
+  }
+}
