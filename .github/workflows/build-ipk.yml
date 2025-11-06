@@ -26,7 +26,7 @@ on:
           - mipsel_24kc
 
 env:
-  OPENWRT_VERSION: '23.05.3'
+  OPENWRT_VERSION: '22.03.5'
   PACKAGE_NAME: 'quecmanager-js'
 
 jobs:
@@ -115,9 +115,18 @@ jobs:
           esac
 
           SDK_FILE="openwrt-sdk-${{ env.OPENWRT_VERSION }}-${TARGET/\//-}.Linux-x86_64.tar.xz"
+          FULL_URL="$SDK_URL/$TARGET/$SDK_FILE"
 
-          echo "Downloading SDK: $SDK_URL/$TARGET/$SDK_FILE"
-          wget -q "$SDK_URL/$TARGET/$SDK_FILE" -O sdk.tar.xz
+          echo "Downloading SDK from: $FULL_URL"
+
+          if ! wget --spider "$FULL_URL" 2>/dev/null; then
+            echo "ERROR: SDK file not found at $FULL_URL"
+            echo "Please check if the target/subtarget is correct for OpenWRT ${{ env.OPENWRT_VERSION }}"
+            echo "Available targets at: https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/"
+            exit 1
+          fi
+
+          wget "$FULL_URL" -O sdk.tar.xz
 
           mkdir -p openwrt-sdk
           tar -xJf sdk.tar.xz --strip-components=1 -C openwrt-sdk
@@ -262,23 +271,3 @@ jobs:
             See full changelog below.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify-success:
-    name: Build Status Notification
-    needs: build-ipk
-    if: success()
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Build Summary
-        run: |
-          echo "## ✅ Build Successful" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "IPK packages built successfully for all architectures!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Architectures:" >> $GITHUB_STEP_SUMMARY
-          echo "- aarch64_cortex-a53 (Qualcomm 5G modems)" >> $GITHUB_STEP_SUMMARY
-          echo "- arm_cortex-a7 (Older Quectel modems)" >> $GITHUB_STEP_SUMMARY
-          echo "- x86_64 (Development/testing)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download artifacts from the Actions tab." >> $GITHUB_STEP_SUMMARY
