@@ -2,6 +2,12 @@
  * Tests for Authentication Middleware
  */
 
+// Mock jose library to prevent ESM import errors
+jest.mock('jose', () => ({
+  SignJWT: jest.fn(),
+  jwtVerify: jest.fn(),
+}));
+
 import { NextRequest } from 'next/server';
 import {
   getClientIP,

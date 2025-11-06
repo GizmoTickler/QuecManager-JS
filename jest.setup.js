@@ -27,6 +27,23 @@ if (typeof globalThis.Response === 'undefined') {
       this.body = body
       this.status = init?.status || 200
       this.headers = new Map(Object.entries(init?.headers || {}))
+      // Store the parsed JSON if body is a string
+      try {
+        this._json = typeof body === 'string' ? JSON.parse(body) : body
+      } catch {
+        this._json = body
+      }
+    }
+
+    static json(data, init) {
+      const response = new Response(JSON.stringify(data), init)
+      // Override with the actual data object
+      response._json = data
+      return response
+    }
+
+    async json() {
+      return this._json
     }
   }
 }
