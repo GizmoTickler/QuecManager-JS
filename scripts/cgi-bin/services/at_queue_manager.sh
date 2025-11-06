@@ -5,6 +5,30 @@
 # Load centralized logging
 . /www/cgi-bin/services/quecmanager_logger.sh
 
+# Load secure input handling library
+SCRIPT_DIR="$(dirname "$0")"
+. "${SCRIPT_DIR}/../quecmanager/lib/secure-input.sh" 2>/dev/null || {
+    # Fallback functions if library not found
+    parse_query_string() {
+        local query_string="$1"
+        local expected_params="$2"
+        for param in $expected_params; do
+            eval "QS_${param}=''"
+        done
+        local IFS='&'
+        for pair in $query_string; do
+            local key="${pair%%=*}"
+            local value="${pair#*=}"
+            for param in $expected_params; do
+                if [ "$key" = "$param" ]; then
+                    eval "QS_${param}=\$value"
+                    break
+                fi
+            done
+        done
+    }
+}
+
 # Script identification for logging
 SCRIPT_NAME_LOG="at_queue_manager"
 
@@ -690,10 +714,17 @@ if [ "${SCRIPT_NAME}" != "" ]; then
         echo "Content-Type: application/json"
         echo ""
     fi
-    
-    # Parse query string for CGI mode
-    eval $(echo "$QUERY_STRING" | sed 's/&/;/g')
-    
+
+    # SECURITY FIX: Parse query string safely without eval()
+    parse_query_string "$QUERY_STRING" "action command priority id timeout"
+
+    # Extract values from QS_ prefixed variables
+    action="$QS_action"
+    command="$QS_command"
+    priority="$QS_priority"
+    id="$QS_id"
+    timeout="$QS_timeout"
+
     case "$action" in
         "enqueue")
             if [ -n "$command" ]; then

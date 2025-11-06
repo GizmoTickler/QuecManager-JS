@@ -6,6 +6,43 @@
 # Load centralized logging
 . /www/cgi-bin/services/quecmanager_logger.sh
 
+# Load secure input handling library
+SCRIPT_DIR="$(dirname "$0")"
+. "${SCRIPT_DIR}/../lib/secure-input.sh" 2>/dev/null || {
+    # Fallback if library not found - use basic functions
+    parse_query_string() {
+        local query_string="$1"
+        local expected_params="$2"
+        for param in $expected_params; do
+            eval "QS_${param}=''"
+        done
+        local IFS='&'
+        for pair in $query_string; do
+            local key="${pair%%=*}"
+            local value="${pair#*=}"
+            for param in $expected_params; do
+                if [ "$key" = "$param" ]; then
+                    eval "QS_${param}=\$value"
+                    break
+                fi
+            done
+        done
+    }
+    normalize_at_command_safe() {
+        local cmd="$1"
+        cmd=$(printf '%b' "${cmd//%/\\x}" 2>/dev/null || echo "$cmd")
+        cmd=$(echo "$cmd" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if echo "$cmd" | grep -qi "^AT"; then
+            printf '%s' "$cmd"
+            return 0
+        fi
+        return 1
+    }
+    validate_numeric() {
+        echo "$1" | grep -qE '^[0-9]+$'
+    }
+}
+
 # Script identification for logging
 SCRIPT_NAME_LOG="at_queue_client"
 
@@ -354,38 +391,79 @@ fi
 # Setup cleanup trap
 trap 'release_token; rmdir "$TOKEN_LOCK_DIR" 2>/dev/null; exit 1' INT TERM
 
-# Parse query string
-eval $(echo "$QUERY_STRING" | sed 's/&/;/g')
+# SECURITY FIX: Parse query string safely without eval()
+# Define expected parameters (whitelist)
+parse_query_string "$QUERY_STRING" "command commands batch timeout priority"
+
+# Extract values from QS_ prefixed variables
+command="$QS_command"
+commands="$QS_commands"
+batch="$QS_batch"
+timeout="$QS_timeout"
+priority="$QS_priority"
+
+# Validate numeric parameters if provided
+if [ -n "$timeout" ]; then
+    if ! validate_numeric "$timeout" 1 300; then
+        echo '{"error":"Invalid timeout parameter","status":"error"}'
+        exit 1
+    fi
+fi
+
+if [ -n "$priority" ]; then
+    if ! validate_numeric "$priority" 1 10; then
+        echo '{"error":"Invalid priority parameter","status":"error"}'
+        exit 1
+    fi
+fi
 
 # Handle batch mode (multiple commands separated by semicolon or space)
 if [ -n "$batch" ] && [ "$batch" = "1" ]; then
     # Batch mode - process multiple commands
     if [ -n "$commands" ]; then
         commands=$(urldecode "$commands")
-        priority=$(get_command_priority "$commands")
-        timeout="${timeout:-$DEFAULT_CMD_TIMEOUT}"
-        
-        # Special handling for QSCAN commands
-        if echo "$commands" | grep -qi "AT+QSCAN"; then
-            timeout=200
+        # Validate each command before processing
+        local invalid_cmd=0
+        for cmd in $commands; do
+            if ! normalize_at_command_safe "$cmd" >/dev/null; then
+                echo '{"error":"Invalid AT command format in batch","status":"error"}'
+                invalid_cmd=1
+                break
+            fi
+        done
+
+        if [ $invalid_cmd -eq 0 ]; then
+            priority=$(get_command_priority "$commands")
+            timeout="${timeout:-$DEFAULT_CMD_TIMEOUT}"
+
+            # Special handling for QSCAN commands
+            if echo "$commands" | grep -qi "AT+QSCAN"; then
+                timeout=200
+            fi
+
+            process_batch_commands "$commands" "$priority" "$timeout"
         fi
-        
-        process_batch_commands "$commands" "$priority" "$timeout"
     else
         echo '{"error":"No commands specified","status":"error"}'
     fi
 else
     # Single command mode
     if [ -n "$command" ]; then
-        command=$(normalize_at_command "$command")
+        # SECURITY: Validate and normalize command
+        command=$(normalize_at_command_safe "$command")
+        if [ $? -ne 0 ] || [ -z "$command" ]; then
+            echo '{"error":"Invalid AT command format","status":"error"}'
+            exit 1
+        fi
+
         priority=$(get_command_priority "$command")
         timeout="${timeout:-$DEFAULT_CMD_TIMEOUT}"
-        
+
         # Special handling for QSCAN commands
         if echo "$command" | grep -qi "AT+QSCAN"; then
             timeout=200
         fi
-        
+
         process_single_command "$command" "$priority" "$timeout"
     else
         echo '{"error":"No command specified","status":"error"}'

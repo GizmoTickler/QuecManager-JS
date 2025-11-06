@@ -13,23 +13,45 @@ INPUT_PASSWORD=$(echo "$POST_DATA" | grep -o 'password=[^&]*' | cut -d= -f2-)
 RESPONSE=""
 HOST_DIR=$(pwd)
 
-# URL-decode the password while preserving most special characters
-# First decode percent-encoded sequences
-urldecode() {
-    local encoded="${1//+/ }"
-    printf '%b' "${encoded//%/\\x}"
+# Load secure input handling library
+SCRIPT_DIR="$(dirname "$0")"
+. "${SCRIPT_DIR}/lib/secure-input.sh" 2>/dev/null || {
+    # Fallback URL decode function
+    urldecode() {
+        local encoded="${1//+/ }"
+        printf '%b' "${encoded//%/\\x}"
+    }
+    # Fallback password validation
+    validate_password() {
+        local password="$1"
+        local len=${#password}
+        if [ "$len" -lt 1 ] || [ "$len" -gt 128 ]; then
+            return 1
+        fi
+        if echo "$password" | grep -qE '[$`&|;<>(){}\\]'; then
+            return 1
+        fi
+        return 0
+    }
 }
 
 # Decode the password
 INPUT_PASSWORD=$(urldecode "$INPUT_PASSWORD")
 
-# Basic validation to reject & and $ characters
-if echo "$INPUT_PASSWORD" | grep -q '[&$]'; then
-    echo '{"state":"failed", "message":"Password contains forbidden characters (& or $)"}'
+# SECURITY: Rate limiting for login attempts (5 attempts per 60 seconds per IP)
+CLIENT_IP="${REMOTE_ADDR:-unknown}"
+if ! check_rate_limit "auth_${CLIENT_IP}" 5 60 2>/dev/null; then
+    echo '{"state":"failed", "message":"Too many login attempts. Please try again later."}'
     exit 1
 fi
 
-# Sanitize the password for shell usage
+# SECURITY: Enhanced password validation
+if ! validate_password "$INPUT_PASSWORD"; then
+    echo '{"state":"failed", "message":"Invalid password format or contains forbidden characters"}'
+    exit 1
+fi
+
+# Sanitize the password for shell usage (defense in depth)
 INPUT_PASSWORD=$(printf '%s' "$INPUT_PASSWORD" | sed 's/[\"]/\\&/g')
 
 # Extract the hashed password from /etc/shadow for the specified user

@@ -8,10 +8,21 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from "@/components/ui/input-group";
-import { CopyIcon, CornerDownLeft, Dot, RefreshCcw, Terminal } from "lucide-react";
+import { CopyIcon, CornerDownLeft, Dot, RefreshCcw, Terminal, ShieldAlert } from "lucide-react";
 import { BsCircleFill } from "react-icons/bs";
 import { useToast } from "@/hooks/use-toast";
 import { atCommandSender } from "@/utils/at-command";
+import { validateATCommand } from "@/constants/at-command-whitelist";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 interface CommandHistoryItem {
   command: string;
@@ -33,6 +44,8 @@ const TerminalComponent = ({ onCommandExecuted, onCommandSuccess, commandHistory
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [suggestion, setSuggestion] = useState<string>("");
   const [commandDictionary, setCommandDictionary] = useState<string[]>([]);
+  const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
+  const [pendingCommand, setPendingCommand] = useState<string>("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Load command dictionary from localStorage
@@ -77,30 +90,8 @@ const TerminalComponent = ({ onCommandExecuted, onCommandSuccess, commandHistory
     }
   }, [input, commandDictionary]);
 
-  const executeCommand = async () => {
-    const command = input.trim();
-
-    // Easter egg check
-    if (command.toLowerCase() === "tetris") {
-      window.open(
-        "/utils/dsMDh6647ZGkOLyv60QE/OGwW8ufEw6nWPQSaliNX/games/tetris",
-        "_blank"
-      );
-      setInput("");
-      return;
-    }
-
-    if (!command.toUpperCase().startsWith("AT")) {
-      toast({
-        title: "Invalid Command",
-        description: "Command must start with 'AT'",
-        variant: "destructive",
-      });
-      return;
-    }
-
+  const executeCommandInternal = async (command: string) => {
     setIsLoading(true);
-    setInput("");
     setOutput(`> ${command}\nExecuting command, please wait...`);
 
     try {
@@ -154,6 +145,63 @@ const TerminalComponent = ({ onCommandExecuted, onCommandSuccess, commandHistory
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const executeCommand = async () => {
+    const command = input.trim();
+
+    // Easter egg check
+    if (command.toLowerCase() === "tetris") {
+      window.open(
+        "/utils/dsMDh6647ZGkOLyv60QE/OGwW8ufEw6nWPQSaliNX/games/tetris",
+        "_blank"
+      );
+      setInput("");
+      return;
+    }
+
+    // SECURITY: Validate command against whitelist
+    const validation = validateATCommand(command);
+
+    if (!validation.allowed) {
+      toast({
+        title: "Command Not Allowed",
+        description: validation.reason || "This command is not permitted",
+        variant: "destructive",
+      });
+
+      // Log blocked command attempt for security audit
+      console.warn("Blocked AT command attempt:", {
+        command,
+        reason: validation.reason,
+        timestamp: new Date().toISOString(),
+      });
+
+      return;
+    }
+
+    // Check if command requires confirmation
+    if (validation.rule?.requiresConfirmation) {
+      setPendingCommand(command);
+      setShowConfirmDialog(true);
+      setInput("");
+      return;
+    }
+
+    // Execute command directly if no confirmation needed
+    setInput("");
+    await executeCommandInternal(command);
+  };
+
+  const handleConfirmCommand = async () => {
+    setShowConfirmDialog(false);
+    await executeCommandInternal(pendingCommand);
+    setPendingCommand("");
+  };
+
+  const handleCancelCommand = () => {
+    setShowConfirmDialog(false);
+    setPendingCommand("");
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -290,9 +338,31 @@ const TerminalComponent = ({ onCommandExecuted, onCommandSuccess, commandHistory
   };
 
   return (
-    <div className="grid w-full lg:max-w-full max-w-sm gap-4">
-      <InputGroup>
-        <InputGroupTextarea
+    <>
+      <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-amber-500" />
+              Confirm Command Execution
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              You are about to execute: <code className="font-mono bg-muted px-2 py-1 rounded">{pendingCommand}</code>
+              <br /><br />
+              This command may modify modem settings or cause temporary network disruption.
+              Are you sure you want to proceed?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleCancelCommand}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmCommand}>Execute Command</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <div className="grid w-full lg:max-w-full max-w-sm gap-4">
+        <InputGroup>
+          <InputGroupTextarea
           ref={textareaRef}
           id="at-terminal-output"
           value={output}
@@ -355,6 +425,7 @@ const TerminalComponent = ({ onCommandExecuted, onCommandSuccess, commandHistory
         </InputGroupAddon>
       </InputGroup>
     </div>
+    </>
   );
 };
 
