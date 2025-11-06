@@ -8,7 +8,10 @@
     "build-package-win": "rm -rf out && rm -fr root && mkdir out && mkdir root && next build && mv out\\index.html out\\login.html && ren out www && mv www root\\ && cp -a scripts\\cgi-bin root\\www\\",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",
